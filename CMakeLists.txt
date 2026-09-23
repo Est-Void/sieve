@@ -16,7 +16,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(Catch2)
 
 add_library(sj_args src/args.cpp)
-add_library(sj_json src/json/scalar.cpp)
+add_library(sj_json src/json/scalar.cpp src/json/string.cpp)
 
 target_include_directories(sj_args PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_include_directories(sj_json PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -36,13 +36,18 @@ endif()
 
 add_executable(test_args tests/test_args.cpp)
 add_executable(test_scalar tests/test_scalar.cpp)
+add_executable(test_string tests/test_string.cpp)
 
 target_link_libraries(test_args PRIVATE sj_args Catch2::Catch2WithMain)
 target_link_libraries(test_scalar PRIVATE sj_json Catch2::Catch2WithMain)
+target_link_libraries(test_string PRIVATE sj_json Catch2::Catch2WithMain)
 target_compile_options(test_args PRIVATE -Wall -Wextra)
 target_compile_options(test_scalar PRIVATE -Wall -Wextra)
-
+target_compile_options(test_string PRIVATE -Wall -Wextra)
+set_target_properties(test_string PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+  
 enable_testing()
 add_test(NAME cli COMMAND bash ${CMAKE_SOURCE_DIR}/tests/cli.sh $<TARGET_FILE:sj>)
 add_test(NAME args COMMAND test_args)
 add_test(NAME scalar COMMAND test_scalar)
+add_test(NAME string COMMAND test_string)

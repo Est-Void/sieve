@@ -1,5 +1,5 @@
-#ifndef JSON_SCALAR_H
-#define JSON_SCALAR_H
+#ifndef SIEVE_JSON_SCALAR_H
+#define SIEVE_JSON_SCALAR_H
 
 #include <cstddef>
 #include <optional>
@@ -9,7 +9,7 @@ enum class ScalarType {
     Null,
     Number,
     Boolean,
-    //Invalid не нужен так как он не может быть возвращен
+    String
 };
 
 struct Scalar {
@@ -17,12 +17,14 @@ struct Scalar {
     union {
         double number;
         bool boolean;
+        std::string_view view;
     };
     std::size_t consumed = 0;
+
 };
 
 std::optional<Scalar> parse_scalar(std::string_view in) noexcept;
 
 
 
-#endif
+#endif // SIEVE_JSON_SCALAR_H
