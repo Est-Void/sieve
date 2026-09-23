@@ -22,4 +22,4 @@ ParseError parse_args(int argc, char *argv[], Args &args,
 
 void print_usage(std::ostream &os);
 
-#endif // ARGS_H    
+#endif // ARGS_H
