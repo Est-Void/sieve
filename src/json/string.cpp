@@ -1,58 +1,77 @@
 #include "json/string.h"
 
+#include "json/detail.h"
+
+#include <cstring>
+
 namespace {
 
-constexpr bool is_ws(char c) noexcept {
-  return c == ' ' || c == '\t' || c == '\n' || c == '\r';
-}
+struct EscapeTable {
+  unsigned char v[256];
+  constexpr EscapeTable() : v{} {
+    v[static_cast<unsigned char>('"')] = '"';
+    v[static_cast<unsigned char>('\\')] = '\\';
+    v[static_cast<unsigned char>('/')] = '/';
+    v[static_cast<unsigned char>('b')] = '\b';
+    v[static_cast<unsigned char>('f')] = '\f';
+    v[static_cast<unsigned char>('n')] = '\n';
+    v[static_cast<unsigned char>('r')] = '\r';
+    v[static_cast<unsigned char>('t')] = '\t';
+  }
+};
+constexpr EscapeTable kEsc{};
 
-constexpr int hex_val(char c) noexcept {
-  if (c >= '0' && c <= '9') {
-    return c - '0';
-  }
-  if (c >= 'a' && c <= 'f') {
-    return c - 'a' + 10;
-  }
-  if (c >= 'A' && c <= 'F') {
-    return c - 'A' + 10;
-  }
-  return -1;
-}
-
-unsigned parse_hex4(std::string_view in, std::size_t p, bool &ok) noexcept {
-  if (p + 4 > in.size()) {
-    ok = false;
-    return 0;
-  }
-  unsigned v = 0;
-  for (int i = 0; i < 4; ++i) {
-    int h = hex_val(in[p + static_cast<std::size_t>(i)]);
-    if (h < 0) {
-      ok = false;
-      return 0;
+struct HexTable {
+  unsigned char v[256];
+  constexpr HexTable() : v{} {
+    for (int i = 0; i < 256; ++i) {
+      v[i] = 0xFF;
     }
-    v = (v << 4) | static_cast<unsigned>(h);
+    for (int i = '0'; i <= '9'; ++i) {
+      v[i] = static_cast<unsigned char>(i - '0');
+    }
+    for (int i = 'a'; i <= 'f'; ++i) {
+      v[i] = static_cast<unsigned char>(i - 'a' + 10);
+    }
+    for (int i = 'A'; i <= 'F'; ++i) {
+      v[i] = static_cast<unsigned char>(i - 'A' + 10);
+    }
   }
-  ok = true;
-  return v;
+};
+constexpr HexTable kHex{};
+
+bool parse_hex4(std::string_view in, std::size_t p, unsigned &out) noexcept {
+  if (p + 4 > in.size()) {
+    return false;
+  }
+  unsigned a = kHex.v[static_cast<unsigned char>(in[p])];
+  unsigned b = kHex.v[static_cast<unsigned char>(in[p + 1])];
+  unsigned c = kHex.v[static_cast<unsigned char>(in[p + 2])];
+  unsigned d = kHex.v[static_cast<unsigned char>(in[p + 3])];
+  if ((a | b | c | d) & 0x80u) {
+    return false;
+  }
+  out = (a << 12) | (b << 8) | (c << 4) | d;
+  return true;
 }
 
-void encode_utf8(std::string &o, unsigned cp) {
+inline char *encode_utf8_to(char *w, unsigned cp) noexcept {
   if (cp < 0x80) {
-    o.push_back(static_cast<char>(cp));
+    *w++ = static_cast<char>(cp);
   } else if (cp < 0x800) {
-    o.push_back(static_cast<char>(0xC0u | (cp >> 6)));
-    o.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    *w++ = static_cast<char>(0xC0u | (cp >> 6));
+    *w++ = static_cast<char>(0x80u | (cp & 0x3Fu));
   } else if (cp < 0x10000) {
-    o.push_back(static_cast<char>(0xE0u | (cp >> 12)));
-    o.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
-    o.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    *w++ = static_cast<char>(0xE0u | (cp >> 12));
+    *w++ = static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu));
+    *w++ = static_cast<char>(0x80u | (cp & 0x3Fu));
   } else {
-    o.push_back(static_cast<char>(0xF0u | (cp >> 18)));
-    o.push_back(static_cast<char>(0x80u | ((cp >> 12) & 0x3Fu)));
-    o.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
-    o.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    *w++ = static_cast<char>(0xF0u | (cp >> 18));
+    *w++ = static_cast<char>(0x80u | ((cp >> 12) & 0x3Fu));
+    *w++ = static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu));
+    *w++ = static_cast<char>(0x80u | (cp & 0x3Fu));
   }
+  return w;
 }
 
 } // namespace
@@ -60,7 +79,7 @@ void encode_utf8(std::string &o, unsigned cp) {
 std::optional<StringResult> parse_string(std::string_view in,
                                          std::string &out) noexcept {
   std::size_t off = 0;
-  while (off < in.size() && is_ws(in[off])) {
+  while (off < in.size() && detail::is_ws(in[off])) {
     ++off;
   }
   if (off >= in.size() || in[off] != '"') {
@@ -69,31 +88,64 @@ std::optional<StringResult> parse_string(std::string_view in,
 
   std::size_t p = off + 1;
   for (;;) {
-    if (p >= in.size()) {
-      return std::nullopt;
+    std::size_t q = detail::find_special(in, p);
+    if (q == std::string_view::npos) {
+      return std::nullopt; 
     }
-    unsigned char c = static_cast<unsigned char>(in[p]);
+    unsigned char c = static_cast<unsigned char>(in[q]);
     if (c == '"') {
       StringResult r;
-      r.view = in.substr(off + 1, p - (off + 1));
-      r.consumed = p + 1;
+      r.view = in.substr(off + 1, q - (off + 1));
+      r.consumed = q + 1;
       r.escaped = false;
       return r;
     }
     if (c == '\\') {
-      break;
-    }
+      p = q;
+      break;     }
     if (c < 0x20) {
-      return std::nullopt;
-    }
-    ++p;
+      return std::nullopt;    }
+    p = q + 1;  
   }
 
   out.clear();
-  out.append(in.data() + off + 1, p - (off + 1));
-  while (p < in.size()) {
+  const std::size_t cap = in.size() - off; 
+  out.resize(cap);
+  char *w = out.data();
+  std::memcpy(w, in.data() + off + 1, p - (off + 1)); 
+  w += p - (off + 1);
+  for (;;) {
+
+    std::size_t q = p;
+    while (q < in.size()) {
+      unsigned char c = static_cast<unsigned char>(in[q]);
+      if (c == '"' || c == '\\' || c < 0x20) {
+        break;
+      }
+      *w++ = static_cast<char>(c);
+      ++q;
+    }
+    if (q >= in.size()) {
+      return std::nullopt; 
+    }
+    if (q - p >= 16) {
+
+      std::size_t e = detail::find_special(in, q);
+      if (e == std::string_view::npos) {
+        return std::nullopt;
+      }
+      if (e > q) {
+        std::memcpy(w, in.data() + q, e - q);
+        w += e - q;
+      }
+      p = e;
+    } else {
+      p = q;
+    }
+
     unsigned char c = static_cast<unsigned char>(in[p]);
     if (c == '"') {
+      out.resize(static_cast<std::size_t>(w - out.data()));
       StringResult r;
       r.view = {};
       r.consumed = p + 1;
@@ -102,78 +154,47 @@ std::optional<StringResult> parse_string(std::string_view in,
     }
     if (c == '\\') {
       ++p;
-      if (p >= in.size()) {
-        return std::nullopt;
-      }
-      switch (in[p]) {
-      case '"':
-        out.push_back('"');
-        ++p;
-        break;
-      case '\\':
-        out.push_back('\\');
-        ++p;
-        break;
-      case '/':
-        out.push_back('/');
-        ++p;
-        break;
-      case 'b':
-        out.push_back('\b');
-        ++p;
-        break;
-      case 'f':
-        out.push_back('\f');
-        ++p;
-        break;
-      case 'n':
-        out.push_back('\n');
-        ++p;
-        break;
-      case 'r':
-        out.push_back('\r');
-        ++p;
-        break;
-      case 't':
-        out.push_back('\t');
-        ++p;
-        break;
-      case 'u': {
-        ++p;
-        bool ok = false;
-        unsigned cp = parse_hex4(in, p, ok);
-        if (!ok) {
-          return std::nullopt;
-        }
-        p += 4;
-        if (cp >= 0xD800 && cp <= 0xDBFF) {
+    } else if (c < 0x20) {
+      return std::nullopt;
+    } else {
 
-          if (p + 6 > in.size() || in[p] != '\\' || in[p + 1] != 'u') {
-            return std::nullopt;
-          }
-          bool ok2 = false;
-          unsigned lo = parse_hex4(in, p + 2, ok2);
-          if (!ok2 || lo < 0xDC00 || lo > 0xDFFF) {
-            return std::nullopt;
-          }
-          p += 6;
-          cp = ((cp - 0xD800u) << 10 | (lo - 0xDC00u)) + 0x10000u;
-        } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
-          return std::nullopt;
-        }
-        encode_utf8(out, cp);
-        break;
-      }
-      default:
-        return std::nullopt;
-      }
+      *w++ = static_cast<char>(c);
+      ++p;
       continue;
     }
-    if (c < 0x20) {
+    if (p >= in.size()) {
       return std::nullopt;
     }
-    out.push_back(in[p]);
+    unsigned char e = static_cast<unsigned char>(in[p]);
+    unsigned simple = kEsc.v[e];
+    if (simple != 0) {
+      *w++ = static_cast<char>(simple);
+      ++p;
+      continue;
+    }
+    if (e != 'u') {
+      return std::nullopt;
+    }
     ++p;
+    unsigned cp = 0;
+    if (!parse_hex4(in, p, cp)) {
+      return std::nullopt;
+    }
+    p += 4;
+    if (cp >= 0xD800 && cp <= 0xDBFF) {
+
+      if (p + 6 > in.size() || in[p] != '\\' || in[p + 1] != 'u') {
+        return std::nullopt;
+      }
+      unsigned lo = 0;
+      if (!parse_hex4(in, p + 2, lo) || lo < 0xDC00 || lo > 0xDFFF) {
+        return std::nullopt;
+      }
+      p += 6;
+      cp = ((cp - 0xD800u) << 10 | (lo - 0xDC00u)) + 0x10000u;
+    } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+      return std::nullopt; 
+    }
+    w = encode_utf8_to(w, cp);
   }
-  return std::nullopt;
 }

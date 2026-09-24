@@ -1,13 +1,17 @@
 #include "args.h"
 #include <cerrno>
+#include <cstddef>
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
 #include <sys/mman.h>
+#include <sys/sendfile.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <vector>
 
 namespace io {
+
 inline bool write_all(int fd, const char *data, std::size_t n) noexcept {
   while (n > 0) {
     ssize_t w = ::write(fd, data, n);
@@ -46,6 +50,65 @@ inline bool copy_fd(int in_fd, int out_fd) {
   }
 }
 
+// Итог попытки копирования средствами ядра: Done — всё ушло,
+// NotStarted — не скопировано ни байта (можно фолбэк на user-space),
+// Failed — ошибка в середине, часть данных уже ушла в out_fd.
+enum class PumpResult { Done, NotStarted, Failed };
+
+// Файл → любой fd без прохода через user-space. Порция ограничена
+// максимумом sendfile (0x7ffff000).
+inline PumpResult try_sendfile(int in_fd, int out_fd, std::size_t size) {
+  off_t off = 0;
+  while (static_cast<std::size_t>(off) < size) {
+    std::size_t chunk = size - static_cast<std::size_t>(off);
+    if (chunk > 0x7ffff000u) {
+      chunk = 0x7ffff000u;
+    }
+    ssize_t s = ::sendfile(out_fd, in_fd, &off, chunk);
+    if (s < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return off == 0 ? PumpResult::NotStarted : PumpResult::Failed;
+    }
+    if (s == 0) {
+      return off == 0 ? PumpResult::NotStarted : PumpResult::Failed;
+    }
+  }
+  return PumpResult::Done;
+}
+
+// Всё, что ядро умеет сплайсить (pipe↔pipe, pipe↔файл) — тоже без
+// user-space копии. Для несплайсимых fd (tty и т.п.) — NotStarted.
+inline PumpResult try_splice(int in_fd, int out_fd) {
+  for (;;) {
+    ssize_t s = ::splice(in_fd, nullptr, out_fd, nullptr, 1 << 20,
+                         SPLICE_F_MOVE);
+    if (s < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return PumpResult::NotStarted;
+    }
+    if (s == 0) {
+      return PumpResult::Done; // EOF
+    }
+  }
+}
+
+// stdin → stdout: сначала ядро, при невозможности — обычный read/write.
+inline bool pump_stdin(int in_fd, int out_fd) {
+  switch (try_splice(in_fd, out_fd)) {
+  case PumpResult::Done:
+    return true;
+  case PumpResult::Failed:
+    return false;
+  case PumpResult::NotStarted:
+    return copy_fd(in_fd, out_fd);
+  }
+  return false;
+}
+
 inline bool copy_file(const char *path, int out_fd) {
   int fd;
   do {
@@ -74,19 +137,22 @@ inline bool copy_file(const char *path, int out_fd) {
 
   ::posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL | POSIX_FADV_WILLNEED);
 
+  switch (try_sendfile(fd, out_fd, static_cast<std::size_t>(st.st_size))) {
+  case PumpResult::Done:
+    ::close(fd);
+    return true;
+  case PumpResult::Failed:
+    ::close(fd);
+    return false;
+  case PumpResult::NotStarted:
+    break; // sendfile недоступен (O_APPEND stdout, старое ядро...) — ниже
+  }
+
   void *map = ::mmap(nullptr, static_cast<std::size_t>(st.st_size), PROT_READ,
                      MAP_PRIVATE, fd, 0);
-  ::close(fd);
   if (map == MAP_FAILED) {
-    int fd2;
-    do {
-      fd2 = ::open(path, O_RDONLY | O_CLOEXEC);
-    } while (fd2 < 0 && errno == EINTR);
-    if (fd2 < 0) {
-      return false;
-    }
-    bool ok = copy_fd(fd2, out_fd);
-    ::close(fd2);
+    bool ok = copy_fd(fd, out_fd);
+    ::close(fd);
     return ok;
   }
 
@@ -96,6 +162,7 @@ inline bool copy_file(const char *path, int out_fd) {
   bool ok = write_all(out_fd, static_cast<const char *>(map),
                       static_cast<std::size_t>(st.st_size));
   ::munmap(map, static_cast<std::size_t>(st.st_size));
+  ::close(fd);
   return ok;
 }
 
@@ -132,7 +199,7 @@ int main(int argc, char *argv[]) {
   }
 
   if (args.files.empty()) {
-    if (!io::copy_fd(STDIN_FILENO, STDOUT_FILENO)) {
+    if (!io::pump_stdin(STDIN_FILENO, STDOUT_FILENO)) {
       std::cerr << "Error copying stdin: " << std::strerror(errno) << '\n';
       return 1;
     }
@@ -141,7 +208,7 @@ int main(int argc, char *argv[]) {
 
   for (const auto &path : args.files) {
     if (path == "-") {
-      if (!io::copy_fd(STDIN_FILENO, STDOUT_FILENO)) {
+      if (!io::pump_stdin(STDIN_FILENO, STDOUT_FILENO)) {
         std::cerr << "Error copying stdin: " << std::strerror(errno) << '\n';
         return 1;
       }

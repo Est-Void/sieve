@@ -16,7 +16,8 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(Catch2)
 
 add_library(sj_args src/args.cpp)
-add_library(sj_json src/json/scalar.cpp src/json/string.cpp)
+add_library(sj_json src/json/scalar.cpp src/json/string.cpp src/json/value.cpp
+                    src/json/detail.cpp)
 
 target_include_directories(sj_args PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_include_directories(sj_json PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -24,30 +25,29 @@ target_include_directories(sj_json PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 add_executable(sj src/main.cpp)
 target_link_libraries(sj PRIVATE sj_args sj_json)
 
-target_compile_options(sj PRIVATE -O3 -Wall -Wextra)
-target_compile_options(sj_args PRIVATE -Wall -Wextra)
-target_compile_options(sj_json PRIVATE -Wall -Wextra)
-set_target_properties(sj PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+add_executable(test_args tests/test_args.cpp)
+target_link_libraries(test_args PRIVATE sj_args Catch2::Catch2WithMain)
+
+foreach(t test_scalar test_string test_value)
+  add_executable(${t} tests/${t}.cpp)
+  target_link_libraries(${t} PRIVATE sj_json Catch2::Catch2WithMain)
+endforeach()
 
 option(SIEVE_NATIVE "Build with -march=native (fastest locally, not portable)" OFF)
-if(SIEVE_NATIVE)
-  target_compile_options(sj PRIVATE -march=native -mtune=native)
-endif()
 
-add_executable(test_args tests/test_args.cpp)
-add_executable(test_scalar tests/test_scalar.cpp)
-add_executable(test_string tests/test_string.cpp)
+# Единый профиль оптимизации: -O3 + LTO на всех наших целях,
+# чтобы инлайн шел через границы модулей (sj ↔ sj_json ↔ sj_args).
+foreach(t sj sj_args sj_json test_args test_scalar test_string test_value)
+  target_compile_options(${t} PRIVATE -O3 -Wall -Wextra)
+  set_target_properties(${t} PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+  if(SIEVE_NATIVE)
+    target_compile_options(${t} PRIVATE -march=native -mtune=native)
+  endif()
+endforeach()
 
-target_link_libraries(test_args PRIVATE sj_args Catch2::Catch2WithMain)
-target_link_libraries(test_scalar PRIVATE sj_json Catch2::Catch2WithMain)
-target_link_libraries(test_string PRIVATE sj_json Catch2::Catch2WithMain)
-target_compile_options(test_args PRIVATE -Wall -Wextra)
-target_compile_options(test_scalar PRIVATE -Wall -Wextra)
-target_compile_options(test_string PRIVATE -Wall -Wextra)
-set_target_properties(test_string PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
-  
 enable_testing()
 add_test(NAME cli COMMAND bash ${CMAKE_SOURCE_DIR}/tests/cli.sh $<TARGET_FILE:sj>)
 add_test(NAME args COMMAND test_args)
 add_test(NAME scalar COMMAND test_scalar)
 add_test(NAME string COMMAND test_string)
+add_test(NAME value COMMAND test_value)
