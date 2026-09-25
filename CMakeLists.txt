@@ -17,7 +17,7 @@ FetchContent_MakeAvailable(Catch2)
 
 add_library(sj_args src/args.cpp)
 add_library(sj_json src/json/scalar.cpp src/json/string.cpp src/json/value.cpp
-                    src/json/detail.cpp)
+                    src/json/escape.cpp src/json/detail.cpp)
 
 target_include_directories(sj_args PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_include_directories(sj_json PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -28,7 +28,7 @@ target_link_libraries(sj PRIVATE sj_args sj_json)
 add_executable(test_args tests/test_args.cpp)
 target_link_libraries(test_args PRIVATE sj_args Catch2::Catch2WithMain)
 
-foreach(t test_scalar test_string test_value)
+foreach(t test_scalar test_string test_value test_escape)
   add_executable(${t} tests/${t}.cpp)
   target_link_libraries(${t} PRIVATE sj_json Catch2::Catch2WithMain)
 endforeach()
@@ -37,7 +37,7 @@ option(SIEVE_NATIVE "Build with -march=native (fastest locally, not portable)" O
 
 # Единый профиль оптимизации: -O3 + LTO на всех наших целях,
 # чтобы инлайн шел через границы модулей (sj ↔ sj_json ↔ sj_args).
-foreach(t sj sj_args sj_json test_args test_scalar test_string test_value)
+foreach(t sj sj_args sj_json test_args test_scalar test_string test_value test_escape)
   target_compile_options(${t} PRIVATE -O3 -Wall -Wextra)
   set_target_properties(${t} PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
   if(SIEVE_NATIVE)
@@ -51,3 +51,4 @@ add_test(NAME args COMMAND test_args)
 add_test(NAME scalar COMMAND test_scalar)
 add_test(NAME string COMMAND test_string)
 add_test(NAME value COMMAND test_value)
+add_test(NAME escape COMMAND test_escape)
